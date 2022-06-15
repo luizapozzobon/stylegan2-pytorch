@@ -23,6 +23,8 @@ from torch.autograd import grad as torch_grad
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+from torchvision.datasets import MNIST
+
 from einops import rearrange, repeat
 from kornia.filters import filter2d
 
@@ -360,13 +362,11 @@ def resize_to_minimum_size(min_size, image):
 class Dataset(data.Dataset):
     def __init__(self, folder, image_size, transparent = False, aug_prob = 0.):
         super().__init__()
+
         self.folder = folder
         self.image_size = image_size
-        self.paths = [p for ext in EXTS for p in Path(f'{folder}').glob(f'**/*.{ext}')]
-        assert len(self.paths) > 0, f'No images were found in {folder} for training'
 
         convert_image_fn = convert_transparent_to_rgb if not transparent else convert_rgb_to_transparent
-        num_channels = 3 if not transparent else 4
 
         self.transform = transforms.Compose([
             transforms.Lambda(convert_image_fn),
@@ -377,12 +377,34 @@ class Dataset(data.Dataset):
             transforms.Lambda(expand_greyscale(transparent))
         ])
 
+        if self.folder == 'mnist':
+            # transform = transforms.Compose([
+            #     transforms.ToTensor(),
+            #     transforms.Normalize((0.5,), (0.5,))])
+            self.dataset = MNIST(
+                '../data',
+                train=True,
+                transform=None,
+                download=True,
+            )
+            num_channels = 1
+        else:
+            self.paths = [p for ext in EXTS for p in Path(f'{folder}').glob(f'**/*.{ext}')]
+            assert len(self.paths) > 0, f'No images were found in {folder} for training'
+            num_channels = 3 if not transparent else 4
+
     def __len__(self):
-        return len(self.paths)
+        if self.folder == 'mnist':
+            return len(self.dataset)
+        else:
+            return len(self.paths)
 
     def __getitem__(self, index):
-        path = self.paths[index]
-        img = Image.open(path)
+        if self.folder == 'mnist':
+            img, _ = self.dataset[index]
+        else:
+            path = self.paths[index]
+            img = Image.open(path)
         return self.transform(img)
 
 # augmentations
@@ -939,6 +961,12 @@ class Trainer():
 
     def set_data_src(self, folder):
         self.dataset = Dataset(folder, self.image_size, transparent = self.transparent, aug_prob = self.dataset_aug_prob)
+
+        # transform = transforms.Compose([transforms.Resize(32)])
+        # if invert_p is not None:
+        #     transform.transforms.append(transforms.RandomInvert(p=invert_p))
+        # transform.transforms.extend([
+
         num_workers = num_workers = default(self.num_workers, NUM_CORES if not self.is_ddp else 0)
         sampler = DistributedSampler(self.dataset, rank=self.rank, num_replicas=self.world_size, shuffle=True) if self.is_ddp else None
         dataloader = data.DataLoader(self.dataset, num_workers = num_workers, batch_size = math.ceil(self.batch_size / self.world_size), sampler = sampler, shuffle = not self.is_ddp, drop_last = True, pin_memory = True)
@@ -981,6 +1009,7 @@ class Trainer():
 
         backwards = partial(loss_backwards, self.fp16)
 
+        breakpoint()
         if exists(self.GAN.D_cl):
             self.GAN.D_opt.zero_grad()
 
@@ -998,6 +1027,7 @@ class Trainer():
 
             for i in range(self.gradient_accumulate_every):
                 image_batch = next(self.loader).cuda(self.rank)
+                breakpoint()
                 self.GAN.D_cl(image_batch, accumulate=True)
 
             loss = self.GAN.D_cl.calculate_loss()

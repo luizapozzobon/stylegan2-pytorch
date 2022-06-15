@@ -13,6 +13,8 @@ import torch.distributed as dist
 
 import numpy as np
 
+
+
 def cast_list(el):
     return el if isinstance(el, list) else [el]
 
@@ -188,3 +190,6 @@ def train_from_folder(
 
 def main():
     fire.Fire(train_from_folder)
+
+if __name__ == '__main__':
+    main()
