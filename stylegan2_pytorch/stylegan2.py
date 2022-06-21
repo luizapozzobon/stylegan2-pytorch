@@ -1,43 +1,36 @@
+import json
+import math
+import multiprocessing
 import os
 import sys
-import math
-import fire
-import json
-
-from tqdm import tqdm
+from contextlib import ExitStack, contextmanager
+from functools import partial
 from math import floor, log2
+from pathlib import Path
 from random import random
 from shutil import rmtree
-from functools import partial
-import multiprocessing
-from contextlib import contextmanager, ExitStack
 
+import fire
 import numpy as np
-
 import torch
-from torch import nn, einsum
-from torch.utils import data
-from torch.optim import Adam
 import torch.nn.functional as F
-from torch.autograd import grad as torch_grad
-from torch.utils.data.distributed import DistributedSampler
-from torch.nn.parallel import DistributedDataParallel as DDP
-
-from torchvision.datasets import MNIST
-
+import torchvision
 from einops import rearrange, repeat
 from kornia.filters import filter2d
-
-import torchvision
+from PIL import Image
+from torch import NoneType, einsum, nn
+from torch.autograd import grad as torch_grad
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.optim import Adam
+from torch.utils import data
+from torch.utils.data.distributed import DistributedSampler
 from torchvision import transforms
-
-from stylegan2_pytorch.version import __version__
-from stylegan2_pytorch.diff_augment import DiffAugment
-
+from torchvision.datasets import MNIST
+from tqdm import tqdm
 from vector_quantize_pytorch import VectorQuantize
 
-from PIL import Image
-from pathlib import Path
+from stylegan2_pytorch.diff_augment import DiffAugment
+from stylegan2_pytorch.version import __version__
 
 try:
     from apex import amp
@@ -366,32 +359,36 @@ class Dataset(data.Dataset):
         self.folder = folder
         self.image_size = image_size
 
-        convert_image_fn = convert_transparent_to_rgb if not transparent else convert_rgb_to_transparent
-
-        self.transform = transforms.Compose([
-            transforms.Lambda(convert_image_fn),
-            transforms.Lambda(partial(resize_to_minimum_size, image_size)),
-            transforms.Resize(image_size),
-            RandomApply(aug_prob, transforms.RandomResizedCrop(image_size, scale=(0.5, 1.0), ratio=(0.98, 1.02)), transforms.CenterCrop(image_size)),
-            transforms.ToTensor(),
-            transforms.Lambda(expand_greyscale(transparent))
-        ])
-
         if self.folder == 'mnist':
-            # transform = transforms.Compose([
-            #     transforms.ToTensor(),
-            #     transforms.Normalize((0.5,), (0.5,))])
             self.dataset = MNIST(
                 '../data',
                 train=True,
                 transform=None,
                 download=True,
             )
+            transforms_list = [
+                transforms.Lambda(partial(resize_to_minimum_size, image_size)),
+                transforms.Resize(image_size),
+                RandomApply(aug_prob, transforms.RandomResizedCrop(image_size, scale=(0.5, 1.0), ratio=(0.98, 1.02)), transforms.CenterCrop(image_size)),
+                transforms.ToTensor(),
+            ]
             num_channels = 1
         else:
             self.paths = [p for ext in EXTS for p in Path(f'{folder}').glob(f'**/*.{ext}')]
             assert len(self.paths) > 0, f'No images were found in {folder} for training'
             num_channels = 3 if not transparent else 4
+            convert_image_fn = convert_transparent_to_rgb if not transparent else convert_rgb_to_transparent
+
+            transforms_list = [
+                transforms.Lambda(convert_image_fn),
+                transforms.Lambda(partial(resize_to_minimum_size, image_size)),
+                transforms.Resize(image_size),
+                RandomApply(aug_prob, transforms.RandomResizedCrop(image_size, scale=(0.5, 1.0), ratio=(0.98, 1.02)), transforms.CenterCrop(image_size)),
+                transforms.ToTensor(),
+                transforms.Lambda(expand_greyscale(transparent))
+            ]
+
+        self.transform = transforms.Compose(transforms_list)
 
     def __len__(self):
         if self.folder == 'mnist':
@@ -458,12 +455,14 @@ class StyleVectorizer(nn.Module):
         return self.net(x)
 
 class RGBBlock(nn.Module):
-    def __init__(self, latent_dim, input_channel, upsample, rgba = False):
+    def __init__(self, latent_dim, input_channel, upsample, rgba = False, out_filters=None):
         super().__init__()
         self.input_channel = input_channel
         self.to_style = nn.Linear(latent_dim, input_channel)
 
-        out_filters = 3 if not rgba else 4
+        if out_filters is None:
+            out_filters = 3 if not rgba else 4
+
         self.conv = Conv2DMod(input_channel, out_filters, 1, demod=False)
 
         self.upsample = nn.Sequential(
@@ -522,20 +521,20 @@ class Conv2DMod(nn.Module):
         return x
 
 class GeneratorBlock(nn.Module):
-    def __init__(self, latent_dim, input_channels, filters, upsample = True, upsample_rgb = True, rgba = False):
+    def __init__(self, latent_dim, input_channels, filters, upsample = True, upsample_rgb = True, rgba = False, out_filters = None):
         super().__init__()
         self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False) if upsample else None
 
         self.to_style1 = nn.Linear(latent_dim, input_channels)
         self.to_noise1 = nn.Linear(1, filters)
         self.conv1 = Conv2DMod(input_channels, filters, 3)
-        
+
         self.to_style2 = nn.Linear(latent_dim, filters)
         self.to_noise2 = nn.Linear(1, filters)
         self.conv2 = Conv2DMod(filters, filters, 3)
 
         self.activation = leaky_relu()
-        self.to_rgb = RGBBlock(latent_dim, filters, upsample_rgb, rgba)
+        self.to_rgb = RGBBlock(latent_dim, filters, upsample_rgb, rgba, out_filters=out_filters)
 
     def forward(self, x, prev_rgb, istyle, inoise):
         if exists(self.upsample):
@@ -582,7 +581,7 @@ class DiscriminatorBlock(nn.Module):
         return x
 
 class Generator(nn.Module):
-    def __init__(self, image_size, latent_dim, network_capacity = 16, transparent = False, attn_layers = [], no_const = False, fmap_max = 512):
+    def __init__(self, image_size, latent_dim, network_capacity = 16, transparent = False, attn_layers = [], no_const = False, fmap_max = 512, out_filters = None):
         super().__init__()
         self.image_size = image_size
         self.latent_dim = latent_dim
@@ -622,7 +621,8 @@ class Generator(nn.Module):
                 out_chan,
                 upsample = not_first,
                 upsample_rgb = not_last,
-                rgba = transparent
+                rgba = transparent,
+                out_filters = out_filters
             )
             self.blocks.append(block)
 
@@ -648,10 +648,12 @@ class Generator(nn.Module):
         return rgb
 
 class Discriminator(nn.Module):
-    def __init__(self, image_size, network_capacity = 16, fq_layers = [], fq_dict_size = 256, attn_layers = [], transparent = False, fmap_max = 512):
+    def __init__(self, image_size, network_capacity = 16, fq_layers = [], fq_dict_size = 256, attn_layers = [], transparent = False, fmap_max = 512, num_init_filters = None):
         super().__init__()
         num_layers = int(log2(image_size) - 1)
-        num_init_filters = 3 if not transparent else 4
+
+        if num_init_filters is None:
+            num_init_filters = 3 if not transparent else 4
 
         blocks = []
         filters = [num_init_filters] + [(network_capacity * 4) * (2 ** i) for i in range(num_layers + 1)]
@@ -710,23 +712,24 @@ class Discriminator(nn.Module):
         return x.squeeze(), quantize_loss
 
 class StyleGAN2(nn.Module):
-    def __init__(self, image_size, latent_dim = 512, fmap_max = 512, style_depth = 8, network_capacity = 16, transparent = False, fp16 = False, cl_reg = False, steps = 1, lr = 1e-4, ttur_mult = 2, fq_layers = [], fq_dict_size = 256, attn_layers = [], no_const = False, lr_mlp = 0.1, rank = 0):
+    def __init__(self, image_size, latent_dim = 512, fmap_max = 512, style_depth = 8, network_capacity = 16, transparent = False, fp16 = False, cl_reg = False, steps = 1, lr = 1e-4, ttur_mult = 2, fq_layers = [], fq_dict_size = 256, attn_layers = [], no_const = False, lr_mlp = 0.1, rank = 0, img_channels = None):
         super().__init__()
         self.lr = lr
         self.steps = steps
         self.ema_updater = EMA(0.995)
 
         self.S = StyleVectorizer(latent_dim, style_depth, lr_mul = lr_mlp)
-        self.G = Generator(image_size, latent_dim, network_capacity, transparent = transparent, attn_layers = attn_layers, no_const = no_const, fmap_max = fmap_max)
-        self.D = Discriminator(image_size, network_capacity, fq_layers = fq_layers, fq_dict_size = fq_dict_size, attn_layers = attn_layers, transparent = transparent, fmap_max = fmap_max)
+        self.G = Generator(image_size, latent_dim, network_capacity, transparent = transparent, attn_layers = attn_layers, no_const = no_const, fmap_max = fmap_max, out_filters = img_channels)
+        self.D = Discriminator(image_size, network_capacity, fq_layers = fq_layers, fq_dict_size = fq_dict_size, attn_layers = attn_layers, transparent = transparent, fmap_max = fmap_max, num_init_filters = img_channels)
 
         self.SE = StyleVectorizer(latent_dim, style_depth, lr_mul = lr_mlp)
-        self.GE = Generator(image_size, latent_dim, network_capacity, transparent = transparent, attn_layers = attn_layers, no_const = no_const)
+        self.GE = Generator(image_size, latent_dim, network_capacity, transparent = transparent, attn_layers = attn_layers, no_const = no_const, out_filters = img_channels)
 
         self.D_cl = None
 
         if cl_reg:
             from contrastive_learner import ContrastiveLearner
+
             # experimental contrastive loss discriminator regularization
             assert not transparent, 'contrastive loss regularization does not work with transparent images yet'
             self.D_cl = ContrastiveLearner(self.D, image_size, hidden_layer='flatten')
@@ -784,6 +787,7 @@ class StyleGAN2(nn.Module):
 class Trainer():
     def __init__(
         self,
+        in_channels = None,
         name = 'default',
         results_dir = 'results',
         models_dir = 'models',
@@ -924,7 +928,7 @@ class Trainer():
     @property
     def hparams(self):
         return {'image_size': self.image_size, 'network_capacity': self.network_capacity}
-        
+
     def init_GAN(self):
         args, kwargs = self.GAN_params
         self.GAN = StyleGAN2(lr = self.lr, lr_mlp = self.lr_mlp, ttur_mult = self.ttur_mult, image_size = self.image_size, network_capacity = self.network_capacity, fmap_max = self.fmap_max, transparent = self.transparent, fq_layers = self.fq_layers, fq_dict_size = self.fq_dict_size, attn_layers = self.attn_layers, fp16 = self.fp16, cl_reg = self.cl_reg, no_const = self.no_const, rank = self.rank, *args, **kwargs)
@@ -1009,7 +1013,6 @@ class Trainer():
 
         backwards = partial(loss_backwards, self.fp16)
 
-        breakpoint()
         if exists(self.GAN.D_cl):
             self.GAN.D_opt.zero_grad()
 
@@ -1027,7 +1030,6 @@ class Trainer():
 
             for i in range(self.gradient_accumulate_every):
                 image_batch = next(self.loader).cuda(self.rank)
-                breakpoint()
                 self.GAN.D_cl(image_batch, accumulate=True)
 
             loss = self.GAN.D_cl.calculate_loss()
@@ -1196,7 +1198,7 @@ class Trainer():
         self.GAN.eval()
         ext = self.image_extension
         num_rows = self.num_image_tiles
-    
+
         latent_dim = self.GAN.G.latent_dim
         image_size = self.GAN.G.image_size
         num_layers = self.GAN.G.num_layers
@@ -1210,7 +1212,7 @@ class Trainer():
 
         generated_images = self.generate_truncated(self.GAN.S, self.GAN.G, latents, n, trunc_psi = self.trunc_psi)
         torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}.{ext}'), nrow=num_rows)
-        
+
         # moving averages
 
         generated_images = self.generate_truncated(self.GAN.SE, self.GAN.GE, latents, n, trunc_psi = self.trunc_psi)
@@ -1301,7 +1303,7 @@ class Trainer():
     def truncate_style_defs(self, w, trunc_psi = 0.75):
         w_space = []
         for tensor, num_layers in w:
-            tensor = self.truncate_style(tensor, trunc_psi = trunc_psi)            
+            tensor = self.truncate_style(tensor, trunc_psi = trunc_psi)
             w_space.append((tensor, num_layers))
         return w_space
 
@@ -1338,11 +1340,11 @@ class Trainer():
             generated_images = self.generate_truncated(self.GAN.SE, self.GAN.GE, latents, n, trunc_psi = self.trunc_psi)
             images_grid = torchvision.utils.make_grid(generated_images, nrow = num_rows)
             pil_image = transforms.ToPILImage()(images_grid.cpu())
-            
+
             if self.transparent:
                 background = Image.new("RGBA", pil_image.size, (255, 255, 255))
                 pil_image = Image.alpha_composite(background, pil_image)
-                
+
             frames.append(pil_image)
 
         frames[0].save(str(self.results_dir / self.name / f'{str(num)}.gif'), save_all=True, append_images=frames[1:], duration=80, loop=0, optimize=True)

@@ -1,18 +1,17 @@
 import os
-import fire
 import random
-from retry.api import retry_call
-from tqdm import tqdm
 from datetime import datetime
 from functools import wraps
-from stylegan2_pytorch import Trainer, NanException
 
-import torch
-import torch.multiprocessing as mp
-import torch.distributed as dist
-
+import fire
 import numpy as np
+import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from retry.api import retry_call
+from tqdm import tqdm
 
+from stylegan2_pytorch import NanException, Trainer
 
 
 def cast_list(el):
@@ -118,9 +117,11 @@ def train_from_folder(
     calculate_fid_num_images = 12800,
     clear_fid_cache = False,
     seed = 42,
-    log = False
+    log = False,
+    img_channels = None,
 ):
     model_args = dict(
+        img_channels = img_channels,
         name = name,
         results_dir = results_dir,
         models_dir = models_dir,
