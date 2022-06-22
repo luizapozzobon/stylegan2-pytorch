@@ -32,6 +32,7 @@ from vector_quantize_pytorch import VectorQuantize
 
 from stylegan2_pytorch.diff_augment import DiffAugment
 from stylegan2_pytorch.version import __version__
+import wandb
 
 try:
     from apex import amp
@@ -949,6 +950,7 @@ class Trainer():
 
     def write_config(self):
         self.config_path.write_text(json.dumps(self.config()))
+        wandb.save(self.config_path.as_posix())
 
     def load_config(self):
         config = self.config() if not self.config_path.exists() else json.loads(self.config_path.read_text())
@@ -971,7 +973,7 @@ class Trainer():
 
         self.dataset = Dataset(folder, self.image_size, transparent = self.transparent, aug_prob = self.dataset_aug_prob , invert_p=self.invert_p)
 
-        num_workers = num_workers = default(self.num_workers, NUM_CORES if not self.is_ddp else 0)
+        num_workers = default(self.num_workers, NUM_CORES if not self.is_ddp else 0)
         sampler = DistributedSampler(self.dataset, rank=self.rank, num_replicas=self.world_size, shuffle=True) if self.is_ddp else None
         dataloader = data.DataLoader(self.dataset, num_workers = num_workers, batch_size = math.ceil(self.batch_size / self.world_size), sampler = sampler, shuffle = not self.is_ddp, drop_last = True, pin_memory = True)
         self.loader = cycle(dataloader)
@@ -1096,6 +1098,10 @@ class Trainer():
             if apply_gradient_penalty:
                 gp = gradient_penalty(image_batch, real_output)
                 self.last_gp_loss = gp.clone().detach().item()
+                wandb.log({
+                    "GP": self.last_gp_loss,
+                    "step/GP": self.steps
+                })
                 self.track(self.last_gp_loss, 'GP')
                 disc_loss = disc_loss + gp
 
@@ -1106,6 +1112,10 @@ class Trainer():
             total_disc_loss += divergence.detach().item() / self.gradient_accumulate_every
 
         self.d_loss = float(total_disc_loss)
+        wandb.log({
+            "lossD": self.d_loss,
+            "step/D": self.steps
+        })
         self.track(self.d_loss, 'D')
 
         self.GAN.D_opt.step()
@@ -1158,6 +1168,10 @@ class Trainer():
             total_gen_loss += loss.detach().item() / self.gradient_accumulate_every
 
         self.g_loss = float(total_gen_loss)
+        wandb.log({
+            "lossG": self.g_loss,
+            "step/G": self.steps
+        })
         self.track(self.g_loss, 'G')
 
         self.GAN.G_opt.step()
@@ -1166,6 +1180,10 @@ class Trainer():
 
         if apply_path_penalty and not np.isnan(avg_pl_length):
             self.pl_mean = self.pl_length_ma.update_average(self.pl_mean, avg_pl_length)
+            wandb.log({
+                "pl_mean": self.pl_mean,
+                "step/PL": self.steps
+            })
             self.track(self.pl_mean, 'PL')
 
         if self.is_main and self.steps % 10 == 0 and self.steps > 20000:
@@ -1220,11 +1238,19 @@ class Trainer():
 
         generated_images = self.generate_truncated(self.GAN.S, self.GAN.G, latents, n, trunc_psi = self.trunc_psi)
         torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}.{ext}'), nrow=num_rows)
+        wandb.log({
+            "generated_regular": wandb.Image(str(self.results_dir / self.name / f'{str(num)}.{ext}')),
+            "step/gen_regular": self.steps
+        })
 
         # moving averages
 
         generated_images = self.generate_truncated(self.GAN.SE, self.GAN.GE, latents, n, trunc_psi = self.trunc_psi)
         torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}-ema.{ext}'), nrow=num_rows)
+        wandb.log({
+            "generated_ema": wandb.Image(str(self.results_dir / self.name / f'{str(num)}-ema.{ext}')),
+            "step/gen_ema": self.steps
+        })
 
         # mixing regularities
 
@@ -1245,6 +1271,10 @@ class Trainer():
 
         generated_images = self.generate_truncated(self.GAN.SE, self.GAN.GE, mixed_latents, n, trunc_psi = self.trunc_psi)
         torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}-mr.{ext}'), nrow=num_rows)
+        wandb.log({
+            "generated_mixing_reglarities": wandb.Image(str(self.results_dir / self.name / f'{str(num)}-mr.{ext}')),
+            "step/gen_mr": self.steps
+        })
 
     @torch.no_grad()
     def calculate_fid(self, num_batches):
@@ -1407,6 +1437,7 @@ class Trainer():
             save_data['amp'] = amp.state_dict()
 
         torch.save(save_data, self.model_name(num))
+        wandb.save(self.model_name(num))
         self.write_config()
 
     def load(self, num = -1):

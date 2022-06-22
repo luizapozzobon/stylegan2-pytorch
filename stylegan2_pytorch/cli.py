@@ -12,6 +12,8 @@ from retry.api import retry_call
 from tqdm import tqdm
 
 from stylegan2_pytorch import NanException, Trainer
+import time
+import wandb
 
 def cast_list(el):
     return el if isinstance(el, list) else [el]
@@ -65,6 +67,7 @@ def run_training(rank, world_size, model_args, data, load_from, new, num_train_s
 
     progress_bar = tqdm(initial = model.steps, total = num_train_steps, mininterval=10., desc=f'{name}<{data}>')
     while model.steps < num_train_steps:
+        wandb.log({"global_step": model.steps})
         retry_call(model.train, tries=3, exceptions=NanException)
         progress_bar.n = model.steps
         progress_bar.refresh()
@@ -168,6 +171,15 @@ def train_from_folder(
         clear_fid_cache = clear_fid_cache,
         mixed_prob = mixed_prob,
         log = log
+    )
+
+    exp_name = f"stylegan2_{invert_p}_{int(time.time())}"
+    wandb.init(
+        project=f"stylegan2-{name}",
+        name=exp_name,
+        tags=["stylegan2", name],
+        config=model_args,
+        save_code=True,
     )
 
     if generate:
