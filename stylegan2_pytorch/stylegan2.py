@@ -26,6 +26,7 @@ from torch.utils import data
 from torch.utils.data.distributed import DistributedSampler
 from torchvision import transforms
 from torchvision.datasets import MNIST
+from torchvision.utils import make_grid
 from tqdm import tqdm
 from vector_quantize_pytorch import VectorQuantize
 
@@ -353,7 +354,7 @@ def resize_to_minimum_size(min_size, image):
     return image
 
 class Dataset(data.Dataset):
-    def __init__(self, folder, image_size, transparent = False, aug_prob = 0.):
+    def __init__(self, folder, image_size, transparent = False, aug_prob = 0., invert_p=0.):
         super().__init__()
 
         self.folder = folder
@@ -370,7 +371,8 @@ class Dataset(data.Dataset):
                 transforms.Lambda(partial(resize_to_minimum_size, image_size)),
                 transforms.Resize(image_size),
                 RandomApply(aug_prob, transforms.RandomResizedCrop(image_size, scale=(0.5, 1.0), ratio=(0.98, 1.02)), transforms.CenterCrop(image_size)),
-                transforms.ToTensor(),
+                transforms.RandomInvert(p=invert_p),
+                transforms.ToTensor()
             ]
             num_channels = 1
         else:
@@ -815,6 +817,7 @@ class Trainer():
         fq_dict_size = 256,
         attn_layers = [],
         no_const = False,
+        invert_p = 0.,
         aug_prob = 0.,
         aug_types = ['translation', 'cutout'],
         top_k_training = False,
@@ -857,6 +860,7 @@ class Trainer():
         self.attn_layers = cast_list(attn_layers)
         self.no_const = no_const
 
+        self.invert_p = invert_p
         self.aug_prob = aug_prob
         self.aug_types = aug_types
 
@@ -964,12 +968,8 @@ class Trainer():
         return {'image_size': self.image_size, 'network_capacity': self.network_capacity, 'lr_mlp': self.lr_mlp, 'transparent': self.transparent, 'fq_layers': self.fq_layers, 'fq_dict_size': self.fq_dict_size, 'attn_layers': self.attn_layers, 'no_const': self.no_const}
 
     def set_data_src(self, folder):
-        self.dataset = Dataset(folder, self.image_size, transparent = self.transparent, aug_prob = self.dataset_aug_prob)
 
-        # transform = transforms.Compose([transforms.Resize(32)])
-        # if invert_p is not None:
-        #     transform.transforms.append(transforms.RandomInvert(p=invert_p))
-        # transform.transforms.extend([
+        self.dataset = Dataset(folder, self.image_size, transparent = self.transparent, aug_prob = self.dataset_aug_prob , invert_p=self.invert_p)
 
         num_workers = num_workers = default(self.num_workers, NUM_CORES if not self.is_ddp else 0)
         sampler = DistributedSampler(self.dataset, rank=self.rank, num_replicas=self.world_size, shuffle=True) if self.is_ddp else None
@@ -1066,6 +1066,14 @@ class Trainer():
             fake_output, fake_q_loss = D_aug(generated_images.clone().detach(), detach = True, **aug_kwargs)
 
             image_batch = next(self.loader).cuda(self.rank)
+            # >>>
+            # save sample batch in the first step
+            if self.is_main:
+                if self.steps == 0:
+                    batch_grid = make_grid(image_batch.detach(), nrow=8)
+                    img_grid = transforms.ToPILImage()(batch_grid)
+                    img_grid.save(str(self.results_dir / self.name / f'batch_sample.png'))
+            # <<<
             image_batch.requires_grad_()
             real_output, real_q_loss = D_aug(image_batch, **aug_kwargs)
 

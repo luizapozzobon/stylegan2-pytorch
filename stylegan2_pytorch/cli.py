@@ -13,7 +13,6 @@ from tqdm import tqdm
 
 from stylegan2_pytorch import NanException, Trainer
 
-
 def cast_list(el):
     return el if isinstance(el, list) else [el]
 
@@ -32,6 +31,14 @@ def set_seed(seed):
 def run_training(rank, world_size, model_args, data, load_from, new, num_train_steps, name, seed):
     is_main = rank == 0
     is_ddp = world_size > 1
+
+    # set seed
+    random.seed(seed + rank)
+    np.random.seed(seed + rank)
+    torch.manual_seed(seed + rank)
+    torch.cuda.manual_seed(seed + rank)
+    torch.cuda.manual_seed_all(seed + rank)
+    torch.backends.cudnn.deterministic = True
 
     if is_ddp:
         set_seed(seed)
@@ -106,6 +113,7 @@ def train_from_folder(
     attn_layers = [],
     no_const = False,
     aug_prob = 0.,
+    invert_p = 0.,
     aug_types = ['translation', 'cutout'],
     top_k_training = False,
     generator_top_k_gamma = 0.99,
@@ -116,7 +124,7 @@ def train_from_folder(
     calculate_fid_every = None,
     calculate_fid_num_images = 12800,
     clear_fid_cache = False,
-    seed = 42,
+    seed = 1024,
     log = False,
     img_channels = None,
 ):
@@ -147,6 +155,7 @@ def train_from_folder(
         fq_dict_size = fq_dict_size,
         attn_layers = attn_layers,
         no_const = no_const,
+        invert_p = invert_p,
         aug_prob = aug_prob,
         aug_types = cast_list(aug_types),
         top_k_training = top_k_training,
