@@ -34,6 +34,16 @@ def run_training(rank, world_size, model_args, data, load_from, new, num_train_s
     is_main = rank == 0
     is_ddp = world_size > 1
 
+    exp_name = f"stylegan2_{model_args['invert_p']}_{int(time.time())}"
+    if rank == 0:
+        wandb.init(
+            project=f"stylegan2-{model_args['name']}",
+            name=exp_name,
+            tags=["stylegan2", model_args['name']],
+            config=model_args,
+            save_code=True,
+        )
+
     # set seed
     random.seed(seed + rank)
     np.random.seed(seed + rank)
@@ -67,7 +77,8 @@ def run_training(rank, world_size, model_args, data, load_from, new, num_train_s
 
     progress_bar = tqdm(initial = model.steps, total = num_train_steps, mininterval=10., desc=f'{name}<{data}>')
     while model.steps < num_train_steps:
-        wandb.log({"global_step": model.steps})
+        if rank == 0:
+            wandb.log({"global_step": model.steps})
         retry_call(model.train, tries=3, exceptions=NanException)
         progress_bar.n = model.steps
         progress_bar.refresh()
@@ -173,14 +184,6 @@ def train_from_folder(
         log = log
     )
 
-    exp_name = f"stylegan2_{invert_p}_{int(time.time())}"
-    wandb.init(
-        project=f"stylegan2-{name}",
-        name=exp_name,
-        tags=["stylegan2", name],
-        config=model_args,
-        save_code=True,
-    )
 
     if generate:
         model = Trainer(**model_args)
@@ -200,6 +203,7 @@ def train_from_folder(
         return
 
     world_size = torch.cuda.device_count()
+
 
     if world_size == 1 or not multi_gpus:
         run_training(0, 1, model_args, data, load_from, new, num_train_steps, name, seed)

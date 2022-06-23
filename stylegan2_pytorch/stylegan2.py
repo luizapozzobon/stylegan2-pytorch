@@ -950,7 +950,8 @@ class Trainer():
 
     def write_config(self):
         self.config_path.write_text(json.dumps(self.config()))
-        wandb.save(self.config_path.as_posix())
+        if self.rank == 0:
+            wandb.save(self.config_path.as_posix())
 
     def load_config(self):
         config = self.config() if not self.config_path.exists() else json.loads(self.config_path.read_text())
@@ -1098,10 +1099,11 @@ class Trainer():
             if apply_gradient_penalty:
                 gp = gradient_penalty(image_batch, real_output)
                 self.last_gp_loss = gp.clone().detach().item()
-                wandb.log({
-                    "GP": self.last_gp_loss,
-                    "step/GP": self.steps
-                })
+                if self.rank == 0:
+                    wandb.log({
+                        "GP": self.last_gp_loss,
+                        "step/GP": self.steps
+                    })
                 self.track(self.last_gp_loss, 'GP')
                 disc_loss = disc_loss + gp
 
@@ -1112,10 +1114,11 @@ class Trainer():
             total_disc_loss += divergence.detach().item() / self.gradient_accumulate_every
 
         self.d_loss = float(total_disc_loss)
-        wandb.log({
-            "lossD": self.d_loss,
-            "step/D": self.steps
-        })
+        if self.rank == 0:
+            wandb.log({
+                "lossD": self.d_loss,
+                "step/D": self.steps
+            })
         self.track(self.d_loss, 'D')
 
         self.GAN.D_opt.step()
@@ -1168,10 +1171,11 @@ class Trainer():
             total_gen_loss += loss.detach().item() / self.gradient_accumulate_every
 
         self.g_loss = float(total_gen_loss)
-        wandb.log({
-            "lossG": self.g_loss,
-            "step/G": self.steps
-        })
+        if self.rank == 0:
+            wandb.log({
+                "lossG": self.g_loss,
+                "step/G": self.steps
+            })
         self.track(self.g_loss, 'G')
 
         self.GAN.G_opt.step()
@@ -1180,10 +1184,11 @@ class Trainer():
 
         if apply_path_penalty and not np.isnan(avg_pl_length):
             self.pl_mean = self.pl_length_ma.update_average(self.pl_mean, avg_pl_length)
-            wandb.log({
-                "pl_mean": self.pl_mean,
-                "step/PL": self.steps
-            })
+            if self.rank == 0:
+                wandb.log({
+                    "pl_mean": self.pl_mean,
+                    "step/PL": self.steps
+                })
             self.track(self.pl_mean, 'PL')
 
         if self.is_main and self.steps % 10 == 0 and self.steps > 20000:
@@ -1238,19 +1243,21 @@ class Trainer():
 
         generated_images = self.generate_truncated(self.GAN.S, self.GAN.G, latents, n, trunc_psi = self.trunc_psi)
         torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}.{ext}'), nrow=num_rows)
-        wandb.log({
-            "generated_regular": wandb.Image(str(self.results_dir / self.name / f'{str(num)}.{ext}')),
-            "step/gen_regular": self.steps
-        })
+        if self.rank == 0:
+            wandb.log({
+                "generated_regular": wandb.Image(str(self.results_dir / self.name / f'{str(num)}.{ext}')),
+                "step/gen_regular": self.steps
+            })
 
         # moving averages
 
         generated_images = self.generate_truncated(self.GAN.SE, self.GAN.GE, latents, n, trunc_psi = self.trunc_psi)
         torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}-ema.{ext}'), nrow=num_rows)
-        wandb.log({
-            "generated_ema": wandb.Image(str(self.results_dir / self.name / f'{str(num)}-ema.{ext}')),
-            "step/gen_ema": self.steps
-        })
+        if self.rank == 0:
+            wandb.log({
+                "generated_ema": wandb.Image(str(self.results_dir / self.name / f'{str(num)}-ema.{ext}')),
+                "step/gen_ema": self.steps
+            })
 
         # mixing regularities
 
@@ -1271,10 +1278,11 @@ class Trainer():
 
         generated_images = self.generate_truncated(self.GAN.SE, self.GAN.GE, mixed_latents, n, trunc_psi = self.trunc_psi)
         torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}-mr.{ext}'), nrow=num_rows)
-        wandb.log({
-            "generated_mixing_reglarities": wandb.Image(str(self.results_dir / self.name / f'{str(num)}-mr.{ext}')),
-            "step/gen_mr": self.steps
-        })
+        if self.rank == 0:
+            wandb.log({
+                "generated_mixing_reglarities": wandb.Image(str(self.results_dir / self.name / f'{str(num)}-mr.{ext}')),
+                "step/gen_mr": self.steps
+            })
 
     @torch.no_grad()
     def calculate_fid(self, num_batches):
@@ -1437,7 +1445,8 @@ class Trainer():
             save_data['amp'] = amp.state_dict()
 
         torch.save(save_data, self.model_name(num))
-        wandb.save(self.model_name(num))
+        if self.rank == 0:
+            wandb.save(self.model_name(num))
         self.write_config()
 
     def load(self, num = -1):
