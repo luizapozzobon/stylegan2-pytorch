@@ -1469,21 +1469,24 @@ class Trainer():
             wandb.save(self.model_name(num))
         self.write_config()
 
-    def load(self, num = -1):
+    def load(self, weights_path=None, num=-1, map_location=None):
         self.load_config()
 
-        name = num
-        if num == -1:
-            file_paths = [p for p in Path(self.models_dir / self.name).glob('model_*.pt')]
-            saved_nums = sorted(map(lambda x: int(x.stem.split('_')[1]), file_paths))
-            if len(saved_nums) == 0:
-                return
-            name = saved_nums[-1]
-            print(f'continuing from previous epoch - {name}')
+        if weights_path is not None:
+            load_data = torch.load(weights_path, map_location=map_location)
+        else:
+            name = num
+            if num == -1:
+                file_paths = [p for p in Path(self.models_dir / self.name).glob('model_*.pt')]
+                saved_nums = sorted(map(lambda x: int(x.stem.split('_')[1]), file_paths))
+                if len(saved_nums) == 0:
+                    return
+                name = saved_nums[-1]
+                print(f'continuing from previous epoch - {name}')
 
-        self.steps = name * self.save_every
+            self.steps = name * self.save_every
 
-        load_data = torch.load(self.model_name(name))
+            load_data = torch.load(self.model_name(name))
 
         if 'version' in load_data:
             print(f"loading from version {load_data['version']}")
