@@ -1285,6 +1285,26 @@ class Trainer():
             })
 
     @torch.no_grad()
+    def generate_samples(self, num_samples=50):
+        self.GAN.eval()
+        ext = self.image_extension
+        # num_rows = self.num_image_tiles
+
+        latent_dim = self.GAN.G.latent_dim
+        image_size = self.GAN.G.image_size
+        num_layers = self.GAN.G.num_layers
+
+        # latents and noise
+
+        latents = noise_list(num_samples, num_layers, latent_dim, device=self.rank)
+        n = image_noise(num_samples, image_size, device=self.rank)
+
+        # generate batch of images, save individually
+        generated_images = self.generate_truncated(self.GAN.S, self.GAN.G, latents, n, trunc_psi = self.trunc_psi)
+        for img_idx, gen_img in tqdm(enumerate(generated_images, start=1)):
+            torchvision.utils.save_image(gen_img, str(self.results_dir / self.name / f'{str(img_idx).zfill(5)}.{ext}'))
+
+    @torch.no_grad()
     def calculate_fid(self, num_batches):
         from pytorch_fid import fid_score
         torch.cuda.empty_cache()
