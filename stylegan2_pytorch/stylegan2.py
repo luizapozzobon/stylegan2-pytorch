@@ -1295,14 +1295,18 @@ class Trainer():
         num_layers = self.GAN.G.num_layers
 
         # latents and noise
+        batch_qtd = 50
+        num_batches = num_samples // batch_qtd
+        for batch_num in tqdm(range(num_batches)):
 
-        latents = noise_list(num_samples, num_layers, latent_dim, device=self.rank)
-        n = image_noise(num_samples, image_size, device=self.rank)
+            latents = noise_list(batch_qtd, num_layers, latent_dim, device=self.rank)
+            n = image_noise(batch_qtd, image_size, device=self.rank)
 
-        # generate batch of images, save individually
-        generated_images = self.generate_truncated(self.GAN.S, self.GAN.G, latents, n, trunc_psi = self.trunc_psi)
-        for img_idx, gen_img in tqdm(enumerate(generated_images, start=1)):
-            torchvision.utils.save_image(gen_img, str(self.results_dir / self.name / f'{str(img_idx).zfill(5)}.{ext}'))
+            # generate batch of images, save individually
+            generated_images = self.generate_truncated(self.GAN.S, self.GAN.G, latents, n, trunc_psi = self.trunc_psi)
+            for img_idx, gen_img in enumerate(generated_images):
+                img_idx = batch_num * batch_qtd + img_idx
+                torchvision.utils.save_image(gen_img, str(self.results_dir / self.name / f'{str(img_idx).zfill(5)}.{ext}'))
 
     @torch.no_grad()
     def calculate_fid(self, num_batches):
